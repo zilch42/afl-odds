@@ -1,0 +1,262 @@
+---
+title: "AFL Odds Analysis"
+output:
+  html_document:
+    df_print: paged
+---
+
+This post is about sports betting (yawn). I'll be honest, I don't have much interest in football. I believe feet are for precision stepping, not precision launching of projectiles. But I tip all the same. We have a tipping competition at work and it's something to do, so why not? And I guess if I were pushed, I'd even admit to having a team. They hold the record for the biggest losing margin in a grand final, so they're super cool.
+
+The tipping site we use displays the betting odds for every game alongside your tip. They look sort of tempting, and I've grown more and more curious about them. Even though I don't really follow the competition or know much about it, I seem to do quite well at tipping (I'm currently second in our comp at round 15 if that means anything). All I go off are the odds and the ladder. So I've always wondered, if I just bet $10 on every game, where would I be at the end of the season?
+
+I must stress that I'm not a gambling man. I did once put $1 in a poker machine and won $20 (because of course I did; that's how they get you). But I'd honestly prefer to just give money away, knowing it will never return, than to take on the risk of a bet. Thankfully, with the magic of historical data, we can answer this question without having to putting any money down.
+
+But before we begin, 1000 disclaimers:
+This post does not constitute financial advice
+Gambling destroys lives
+If you ruin your life, it's not my fault
+If you don't believe me, take it from my good pals, The Whitlams
+
+On with it----------------------------
+
+I got a bunch of historical betting AFL betting odds and game results from Aussie Sports betting for seasons 2010 - 2017, not including finals (because anything can happen).
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# analysis of aft betting odds
+# data from http://www.aussportsbetting.com/data/historical-afl-results-and-odds-data/
+# not to be taken as financial advice
+# gambling destroys lives
+# blow up the pokies
+
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(formattable)
+
+# read data from excel file
+aflOddsRaw <- read_excel("aflOdds.xlsx")    # warnings relate to stringlenth in comments field. It fine. 
+aflFixture <- read_excel("aflFixture.xlsx")
+aflOdds <- as_tibble(aflOddsRaw)
+aflFixture <- as.tibble(unique(aflFixture))
+
+# do some transformations so we have useful groups
+aflOdds$Season <- substring(aflOdds$Date,1,4)
+aflOdds <- subset(aflOdds, Season %in% 2010:2017)    #2009 only started at round 12 and 2018 incomplete so scrap it
+
+# calculate rounds. Used another table from http://www.fanfooty.com.au/resources.php
+aflOdds <- aflOdds %>% left_join(select(aflFixture,Date,Round),by="Date")
+
+# calculate high and low odds
+aflOdds$HighOdds <- pmin(aflOdds$`Home Odds`,aflOdds$`Away Odds`)
+aflOdds$LowOdds <- pmax(aflOdds$`Home Odds`,aflOdds$`Away Odds`)
+
+# split finals because they're probably a bit hard and anything can happen
+aflFinals <- filter(aflOdds,aflOdds$`Play Off Game?`=='Y')
+aflHA <- filter(aflOdds,is.na(aflOdds$`Play Off Game?`))    #why the hell did !='Y' not work? 
+
+```
+
+
+```{r calculate bets}
+# calculate who the house tips and winner
+tipWinner <- 1
+aflHA$HomeTipped <- ifelse(aflHA$`Home Odds` < aflHA$`Away Odds`,tipWinner,1-tipWinner)
+aflHA$HomeWin <- ifelse(aflHA$`Home Score` > aflHA$`Away Score`,1,0)
+aflHA$Correct <- ifelse(aflHA$HomeTipped == aflHA$HomeWin,1,0)
+
+# calculate bets
+#lowBound <- 1.26
+#highBound <- 1.49
+lowBound <- 1
+highBound <- 2
+aflHA$Bet <- ifelse(between(aflHA$HighOdds,lowBound,highBound),10,0)
+aflHA$Payout <- aflHA$Correct*aflHA$Bet*(aflHA$HighOdds*tipWinner+aflHA$LowOdds*(1-tipWinner))
+aflHA$NetPos <- aflHA$Payout - aflHA$Bet
+
+```
+
+First I just did a quick and dirty calculation: If I'd put a $10 bet on every game, regardless of the odds, where would I have been after 8 years of betting? I assumed that the betting agency (the house) would be the best at tipping because they do this for a living, and they'd have all the data in all the world on this sport in order to generate their odds. So I just put my hypothetical bet on whoever they gave the better odds. Where would I be?
+
+```{r quick summary, message=FALSE, warning=FALSE}
+# do some analysis
+netPosSum <- summarise(group_by(aflHA,Season,Round),netPos=sum(NetPos))
+
+sum(aflHA$NetPos)
+sum(aflHA$Correct)/nrow(aflHA)
+
+```
+
+Huh. Well, the house always wins I guess. But since that's not very interesting, and I'd already got all the data, I thought I'd play around a bit more.
+
+First I broke it down by season to see if it was the same story every year (see below). At best, in 2011 I would have actually made $14! (After investing $1,870...). At worst, I'd have lost almost $300. But the margin for the house was lower than I expected; under 10% except for 2010, when their hit rate was the lowest. (In some sense, it's actually in their interest not to get all of their tips right, otherwise this kind of systematic betting would be a no-brainer).
+
+```{r summary by season}
+x <- aflHA %>% group_by(Season) %>% 
+  summarise("Hit Rate"= sum(HomeTipped==HomeWin)/n(), Bet = sum(Bet), 
+  "Total Win/Loss" = sum(NetPos), 
+  Return = sum(NetPos)/sum(Bet))
+
+tibble(Season = x$Season, "Correct Tips" = percent(x$`Hit Rate`,digits=0), 
+  Spend = currency(x$Bet,digits=0), 
+  "Total Win/Loss" = gsub("\\$-","-$",currency(x$`Total Win/Loss`,digits=0)), 
+  Return = percent(x$Return,0)) %>% kable(format='html',align="c") %>% kable_styling(full_width = F, bootstrap_options = c("hover","striped","bordered"))
+
+```
+
+I then had a look at trends over the season. I was interested in whether the odds became more reliable as the season went on. My theory being that the start of a season is harder to predict while teams sort themselves out on the ladder, whereas it should get easier as the season wears on and teams establish their form. My hope was to find a simple rule that might result in consistent winnings (e.g. don't bet on anything before Round 10).
+
+This is shown in the graph below, which is a bit of a messy scatter. In each season there are rounds that provide a reasonable profit and others result in significant losses, there's no real pattern within seasons. The average over all 8 seasons (thick black line) did creep up as the seasons progressed, so my hypothesis did sort of hold up, but not enough to make a profit.
+
+```{r season trends, message=FALSE, warning=FALSE}
+ggplot(netPosSum,aes(Round,netPos)) +
+  geom_point(aes(group = Season, colour=Season)) +
+  geom_line(aes(group = Season, colour=Season)) +
+  geom_smooth(colour='black') + geom_line(aes(y=0)) +
+  labs(y = "Total Win/Loss From Round ($)")
+```
+
+Then I tried to break it down by different odds. I wanted to see whether some types of matchups were more profitable than others, in the hope of coming up with another simple rule (e.g. only bet on games where the odds are < $1.20. They should be fairly certain games to win, but they don't pay very well). That didn't look very good either. There was one small positive peak at around $1.50, but it wasn't very wide, and therefore not very reliable.
+
+```{r net position by odd}
+ggplot(aflHA,aes(x=HighOdds,y=NetPos))+
+  stat_summary_bin(bins=50,fun.y="sum",na.rm=TRUE,geom="bar") +
+  labs(x="Odds for house tipped team ($)", y="Win/Loss ($)")
+```
+
+What are the odds actually saying?----------------------
+
+When the house puts a team at $1.20 in a match-up, what they are saying is "We believe we'll get this game right at least 5/6 times" (You win 20c per game. After 5 wins you've won a whole dollar. If you lose the 6th you're back to breaking even). (Note, this is oversimplified as it discounts any margin that the house has built into their odds for themselves). If a team is at $1.50, they reckon they'll get the game right at least 2/3 times. If it's $1.90, they literally have no idea. There is a very strong correlation between the for/against odds (which is why I've only dealt with the odds of the team they tip so far). The flip side of this is that when the house gets those "fairly certain" games wrong, the other team pays out quite well. So I then started looking at systematically betting against the house.
+
+```{r odds correlation}
+ggplot(aflHA,aes(x=HighOdds,y=LowOdds))+geom_point()+labs(x="Odds for house tipped winner",y="Odds for house tipped loser")
+```
+
+Watching the world burn------------------------
+
+I went back and recalculated my bets, betting against the team that the house picked, and re-ran all of my calculations. 
+
+```{r betting on loser}
+tipWinner <- 0
+aflHA$HomeTipped <- ifelse(aflHA$`Home Odds` < aflHA$`Away Odds`,tipWinner,1-tipWinner)
+aflHA$HomeWin <- ifelse(aflHA$`Home Score` > aflHA$`Away Score`,1,0)
+aflHA$Correct <- ifelse(aflHA$HomeTipped == aflHA$HomeWin,1,0)
+
+# calculate bets
+#lowBound <- 1.26
+#highBound <- 1.49
+lowBound <- 1
+highBound <- 2
+aflHA$Bet <- ifelse(between(aflHA$HighOdds,lowBound,highBound),10,0)
+aflHA$Payout <- aflHA$Correct*aflHA$Bet*(aflHA$HighOdds*tipWinner+aflHA$LowOdds*(1-tipWinner))
+aflHA$NetPos <- aflHA$Payout - aflHA$Bet
+```
+
+Over 8 years I would now have won.....
+
+```{r quick summary 2, message=FALSE, warning=FALSE}
+# do some analysis
+netPosSum <- summarise(group_by(aflHA,Season,Round),netPos=sum(NetPos))
+
+sum(aflHA$NetPos)
+sum(aflHA$Correct)/nrow(aflHA)
+
+```
+
+Well... I guess I saw that coming. 
+
+```{r summary by season 2}
+x <- aflHA %>% group_by(Season) %>% 
+  summarise("Hit Rate"= sum(HomeTipped==HomeWin)/n(), Bet = sum(Bet), 
+  "Total Win/Loss" = sum(NetPos), 
+  Return = sum(NetPos)/sum(Bet))
+
+tibble(Season = x$Season, "Correct Tips" = percent(x$`Hit Rate`,digits=0), 
+  Spend = currency(x$Bet,digits=0), 
+  "Total Win/Loss" = gsub("\\$-","-$",currency(x$`Total Win/Loss`,digits=0)), 
+  Return = percent(x$Return,0)) %>% kable(format='html',align="c") %>% kable_styling(full_width = F, bootstrap_options = c("hover","striped","bordered"))
+
+```
+
+But I did start to see some more interesting things. The trend by round still didn't go positive at any point in the season, but there were some much more profitable rounds than I saw when betting with the house.
+
+```{r season trends 2, message=FALSE, warning=FALSE}
+ggplot(netPosSum,aes(Round,netPos)) +
+  geom_point(aes(group = Season, colour=Season)) +
+  geom_line(aes(group = Season, colour=Season)) +
+  geom_smooth(colour='black') + geom_line(aes(y=0)) +
+  labs(y = "Total Win/Loss From Round ($)")
+```
+
+Breaking it down by different odds, I finally found something potentially useful: a reasonably wide area on the odds spectrum that seemed to turn a profit. The region is circled in red below. It seems that when house puts teams between $1.26 and $1.49, they get it wrong often enough that it's worth betting against the house. And if the house gets it wrong, these games pay between $2.53 and $3.91.
+
+```{r net position by odd 2}
+ggplot(aflHA,aes(x=HighOdds,y=NetPos))+
+  stat_summary_bin(bins=50,fun.y="sum",na.rm=TRUE,geom="bar") +
+  labs(x="Odds for house tipped team ($)", y="Win/loss (betting against house) ($)")
+```
+
+Applying my simple rule--------------------
+
+I recalculated my hypothetical bets, only bet on games where the house put their tipped team between $1.26 and $1.49, and I bet against that team. 
+
+```{r calculate bets 3}
+# calculate who the house tips and winner
+tipWinner <- 0
+aflHA$HomeTipped <- ifelse(aflHA$`Home Odds` < aflHA$`Away Odds`,tipWinner,1-tipWinner)
+aflHA$HomeWin <- ifelse(aflHA$`Home Score` > aflHA$`Away Score`,1,0)
+aflHA$Correct <- ifelse(aflHA$HomeTipped == aflHA$HomeWin,1,0)
+
+# calculate bets
+lowBound <- 1.26
+highBound <- 1.49
+aflHA$Bet <- ifelse(between(aflHA$HighOdds,lowBound,highBound),10,0)
+aflHA$Payout <- aflHA$Correct*aflHA$Bet*(aflHA$HighOdds*tipWinner+aflHA$LowOdds*(1-tipWinner))
+aflHA$NetPos <- aflHA$Payout - aflHA$Bet
+
+
+```
+
+Over 8 seasons of betting I would now have won...
+
+```{r quick summary 3, message=FALSE, warning=FALSE}
+# do some analysis
+netPosSum <- summarise(group_by(aflHA,Season,Round),netPos=sum(NetPos))
+
+sum(aflHA$NetPos)                   #total win/loss
+sum(aflHA$Correct)/nrow(aflHA)      #correct tips %
+sum(aflHA$Bet)                      #total spend
+sum(aflHA$NetPos)/sum(aflHA$Bet)    #overall return
+```
+
+Cool! I'd also be spending less as I'd only be betting on about a third of games. I then took a breath, and broke it down by season again to see where the gains were coming from.
+
+Most of the winnings only came from 2 of the 8 seasons: 36% return in 2010 and 42% in 2017. Outside of that, the return ranged from a loss of 8% in 2011 to a gain of 16% in 2016. Some years really didn't return anything at all.
+
+```{r summary by season 3}
+x <- aflHA %>% group_by(Season) %>% 
+  summarise("Hit Rate"= sum(HomeTipped==HomeWin)/n(), Bet = sum(Bet), 
+  "Total Win/Loss" = sum(NetPos), 
+  Return = sum(NetPos)/sum(Bet))
+
+tibble(Season = x$Season, "Correct Tips" = percent(x$`Hit Rate`,digits=0), 
+  Spend = currency(x$Bet,digits=0), 
+  "Total Win/Loss" = gsub("\\$-","-$",currency(x$`Total Win/Loss`,digits=0)), 
+  Return = percent(x$Return,0)) %>% kable(format='html',align="c") %>% kable_styling(full_width = F, bootstrap_options = c("hover","striped","bordered"))
+
+```
+
+At 2 of 8 seasons, it's not very consistent. There is no way of knowing if a new season is going to yield a strong, neutral or negative result; and it's tough psychologically to stick to the plan when you're only getting ~30% of your bets right.
+
+Conclusion-------------------
+
+So. I could bet consistently with a simple-ish rule for 8 years and maybe win $600... or I could just do a week's worth of honest work. ¯\_(ツ)_/¯
+
+One thing I didn't look at was how my own tips would have stacked up, because I don't always bet with the house. But I didn't have an easy way of downloading that data, and the more I thought about it, the more I didn't want to do it anyway. The sports betting industry only exists because it's profitable and it's only profitable because the average punter is losing. I didn't like my chances.
+
+Even having found a simple rule I could have exploited to turn a profit, it wasn't consistent across seasons and didn't fill me with confidence. When you start betting systematically like that, you're no longer really betting on games of football, you're betting on the belief that you're smarter than the house. These places likely have data people and sports statisticians behind the scenes and be constantly improving their algorithms. Again, I didn't like my chances.
+
+I could also have gone further, drawn on more data, tried to build a more sophisticated model, but I just don't want to care that much about football. On the plus side though, I'm no longer curious about betting odds.
+
+If, after all this, you're still intent on throwing your money away, might I suggest charity? Yes, the losses are higher, but the risk is eliminated + it comes with a guaranteed fuzzy feeling.
